@@ -31,4 +31,6 @@ python gui.py
 
 ---
 
+感谢 @Zhao2441010 的技术支持
+
 @PanSomeone
