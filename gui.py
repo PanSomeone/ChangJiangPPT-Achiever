@@ -1,4 +1,10 @@
 
+"""
+长江雨课堂 PPT 批量下载器
+- 自动扫描课程课件，并发下载幻灯片图片并合成为 PDF
+- 支持 Cookie 登录 / 浏览器自动登录
+- 内容指纹去重、断点续传
+"""
 import json, os, sys, time, io, shutil, hashlib, ctypes, webbrowser, threading
 from pathlib import Path
 import tkinter as tk
@@ -13,6 +19,7 @@ from urllib3.util.retry import Retry
 HERE = Path(__file__).parent
 CONFIG_FILE = HERE / "config.json"
 
+# 解决 Windows 高分屏模糊 (DPI 感知)
 if sys.platform == "win32":
     for fn in (lambda: ctypes.windll.shcore.SetProcessDpiAwareness(2),
                lambda: ctypes.windll.shcore.SetProcessDpiAwareness(1),
@@ -25,10 +32,12 @@ URLS = [("changjiang","https://changjiang.yuketang.cn"),("www","https://www.yuke
 _base = None
 
 class Engine:
+    """核心引擎：负责 API 请求、课件解析、图片下载与 PDF 合成"""
     def __init__(self):
-        self.cookies={}; self.uid=""; self.base=""; self.s=None; self.stop=False; self.pause=False; self._ck={}
+        self.cookies={}; self.uid=""; self.base=""; self.s=None; self.stop=False; self.pause=False; self._ck={}  # _ck: 断点索引缓存
 
     def load(self):
+        """从 config.json 加载已保存的 Cookie 和学校 ID"""
         if not CONFIG_FILE.exists(): return False
         try:
             d = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
@@ -41,24 +50,28 @@ class Engine:
         except: return False
 
     def save(self, raw, uid=""):
+        """保存 Cookie 和学校 ID 到 config.json"""
         data = {"cookie": raw, "uid": uid if uid else self._du()}
         CONFIG_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         self.cookies = self._p(raw)
         self.uid = data["uid"]
 
     def _p(self,s):
+        """解析 Cookie 字符串为字典 (key=value; key=value)"""
         d={}
         for x in s.split(";"):
             x=x.strip()
             if"="in x:k,v=x.split("=",1);d[k.strip()]=v.strip()
         return d
     def _du(self):
+        """从 Cookie 中提取学校 ID (university_id 或 uv_id)"""
         for k in("university_id","uv_id"):
             v=self.cookies.get(k,"")
             if v.isdigit(): return v
         return ""
 
     def mk(self,cid=""):
+        """创建带 Cookie 和请求头的 requests.Session，配置连接池"""
         cs=self.cookies.get("csrftoken",""); s=requests.Session(); s.cookies.update(self.cookies)
         adapter=HTTPAdapter(pool_connections=20,pool_maxsize=20,max_retries=Retry(total=2,backoff_factor=0.1))
         s.mount("https://",adapter); s.mount("http://",adapter)
@@ -67,6 +80,7 @@ class Engine:
         s.headers.update(h); return s
 
     def detect(self):
+        """探测可用的雨课堂 API 域名 (changjiang / www)，缓存到全局 _base"""
         global _base
         if _base: self.base=_base; return _base
         s=self.mk()
@@ -78,15 +92,18 @@ class Engine:
         _base=URLS[0][1]; self.base=_base; return _base
 
     def api(self,url,prm=None):
+        """通用 API 请求，返回 JSON 字典"""
         try: return self.s.get(url,params=prm,timeout=15).json()
         except: return{}
 
     def courses(self):
+        """获取当前账号的全部课程列表"""
         d=self.api(f"{self.base}/v2/api/web/courses/list",{"identity":2})
         if not d or d.get("errcode")!=0: return[]
         r=d.get("data",{}); return r if isinstance(r,list)else r.get("list",[])
 
     def lessons(self,cid):
+        """分页获取指定课程的课时列表"""
         xs=[]; p=0
         while True:
             d=self.api(f"{self.base}/v2/api/web/logs/learn/{cid}",{"actype":14,"page":p,"offset":20,"sort":-1})
@@ -97,17 +114,19 @@ class Engine:
         return xs
 
     def pres(self,lid):
+        """获取指定课时的课件列表 (可能有多个 PPT)"""
         d=self.api(f"{self.base}/api/v3/lesson-summary/student",{"lesson_id":lid})
         if not d or d.get("code")!=0: return[]
         return d.get("data",{}).get("presentations",[])
 
     def slides(self,lid,pid):
+        """获取课件中每一页幻灯片的封面图 URL 列表"""
         d=self.api(f"{self.base}/api/v3/lesson-summary/student/presentation",{"presentation_id":pid,"lesson_id":lid})
         if not d or d.get("code")!=0: return[]
         return [s["cover"]for s in d.get("data",{}).get("slides",[])if s.get("cover")]
 
     def dlimg(self, url):
-        """每个线程使用独立 Session，避免线程安全问题"""
+        """单张图片下载 (线程安全，每个线程独立 requests 调用)，最多重试 3 次"""
         for _ in range(3):
             try:
                 r = requests.get(
@@ -124,7 +143,7 @@ class Engine:
         return None
 
     def dl_slides(self, urls, prog_cb=None, workers=8):
-        """并发下载幻灯片，严格保持顺序，丢页返回 None 占位"""
+        """并发下载多张幻灯片图片 (默认 8 线程)，保持原始顺序，失败返回 None"""
         results = [None] * len(urls)
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futures = {ex.submit(self.dlimg, u): i for i, u in enumerate(urls)}
@@ -141,6 +160,7 @@ class Engine:
         return results
 
     def pdf(self,imgs,path):
+        """将多张图片字节流合成为单个 PDF 文件"""
         ps=[]
         for b in imgs:
             if not b: continue
@@ -150,15 +170,21 @@ class Engine:
         ps[0].save(path,save_all=True,append_images=ps[1:],format="PDF"); return True
 
     @staticmethod
-    def saf(s): return "".join(c if c not in r'\/:*?"<>|'else"_"for c in s).strip()
+    def saf(s):
+        """过滤文件名中的非法字符，替换为下划线"""
+        return "".join(c if c not in r'\/:*?"<>|'else"_"for c in s).strip()
 
     def run(self,cid,odir,prog,log):
+        """主下载流程：扫描课件 → 并发下载幻灯片 → 合成 PDF (支持去重、断点续传)"""
+        # 准备工作：创建 Session、输出目录、缓存文件
         self.s=self.mk(cid); d=Path(odir)/cid; d.mkdir(parents=True,exist_ok=True)
         cf=d/".dl.json"; hf_=d/".hash.json"; ck=d/".ckpt.json"
+        # 加载已下载的文件缓存 (pid -> 文件路径)
         cache={}
         if cf.exists():
             try: cache=json.loads(cf.read_text(encoding="utf-8"))
             except: pass
+        # 确定断点续传起始位置
         start=0
         if cid in self._ck: start=self._ck[cid]
         elif ck.exists():
@@ -168,6 +194,7 @@ class Engine:
         ls=self.lessons(cid)
         if not ls: log("[无课时]"); return
 
+        # 扫描所有课时，收集课件信息
         log("扫描课件...")
         pres=[]
         for li,l in enumerate(ls):
@@ -182,6 +209,7 @@ class Engine:
             prog(li+1,len(ls),f"扫描 {li+1}/{len(ls)}")
 
         total=len(pres); s={"n":0,"d":0,"s":0,"f":0}
+        # 构建内容指纹 (fp) -> 已下载路径的哈希缓存，用于去重
         hc={}
         for pid_,fp_ in self._ldh(hf_).items():
             if fp_ and pid_ in cache: hc[fp_]=(pid_,cache[pid_])
@@ -192,14 +220,17 @@ class Engine:
             if self.stop: self._ck[cid]=i; self._svc(ck,i); return
             it=pres[i]; pid=it["pid"]; nm=it["nm"]; fp=it["fp"]; sls=it["sls"]; out=str(d/nm)
 
+            # 去重检查 1: pid 在缓存中 → 直接复用已有文件
             if pid in cache:
                 ex=cache[pid]
                 if os.path.exists(ex)and os.path.abspath(ex)!=os.path.abspath(out): shutil.copy2(ex,out)
                 s["d"]+=1; prog(i+1,total); self._svc(ck,i+1); continue
+            # 去重检查 2: 输出文件已存在 → 跳过
             if os.path.exists(out):
                 cache[pid]=out
                 if fp: self._svh(hf_,pid,fp); hc[fp]=(pid,out)
                 self._sv(cf,cache); s["s"]+=1; prog(i+1,total); self._svc(ck,i+1); continue
+            # 去重检查 3: 内容指纹相同 → 硬链接复制已有文件
             if fp and fp in hc:
                 ep,ex=hc[fp]
                 if os.path.exists(ex): shutil.copy2(ex,out); cache[pid]=ex; self._sv(cf,cache)
@@ -218,10 +249,12 @@ class Engine:
             while self.pause and not self.stop:
                 time.sleep(0.3)
 
+            # 并发下载所有幻灯片图片 (8 线程)
             def _pg(cur, tot):
                 prog(i + 1, total, f"{nm[:30]} {cur}/{tot}")
 
             raw_im = self.dl_slides(sls, prog_cb=_pg)
+            # 过滤下载失败的图片，成功率需 >80% 才生成 PDF
             im = [b for b in raw_im if b]
             if len(im) < len(sls) * 0.8:
                 log(f"[失败] {nm} (仅下载{len(im)}/{len(sls)}页,成功率不足80%)")
@@ -248,25 +281,30 @@ class Engine:
         log(f"共{total} | 新:{s['n']} 重复:{s['d']} 跳过:{s['s']} 失败:{s['f']}")
 
     def _sv(self,p,d):
+        """保存下载缓存 (pid -> 文件路径)"""
         try: p.write_text(json.dumps(d,ensure_ascii=False,indent=2),encoding="utf-8")
         except: pass
     def _svh(self,p,pid,fp):
+        """保存内容指纹 (pid -> md5 hash)"""
         try:
             d={}
             if p.exists(): d=json.loads(p.read_text(encoding="utf-8"))
             d[pid]=fp; p.write_text(json.dumps(d,ensure_ascii=False,indent=2),encoding="utf-8")
         except: pass
     def _ldh(self,p):
+        """加载内容指纹字典"""
         try:
             if p.exists(): return json.loads(p.read_text(encoding="utf-8"))
         except: pass
         return{}
     def _svc(self,p,i):
+        """保存断点续传索引"""
         try: p.write_text(json.dumps({"i":i},ensure_ascii=False),encoding="utf-8")
         except: pass
 
 # ===== GUI =====
 class App(tk.Tk):
+    """Tkinter 主窗口：Cookie 管理、课程选择、下载控制"""
     def __init__(self):
         super().__init__()
         self.title("长江雨课堂PPT批量下载器")
@@ -279,6 +317,7 @@ class App(tk.Tk):
         self._check_login()
 
     def _build(self):
+        """构建界面布局：标题栏、账号区、课程列表、输出路径、进度条、日志"""
         # header - 44px
         hf=tk.Frame(self,bg="#4A90D9",height=44); hf.place(x=0,y=0,relwidth=1)
         hf.pack_propagate(False)
@@ -339,6 +378,7 @@ class App(tk.Tk):
         tk.Label(ff,text="@PanSomeone",fg="#ccc",font=("Microsoft YaHei UI",7)).pack(side=tk.LEFT,pady=10)
 
     def _bind_scroll(self,cv):
+        """为课程列表 Canvas 绑定鼠标滚轮事件"""
         def en(e): self._ac=cv
         def lv(e): self._ac=None
         def wh(e):
@@ -347,11 +387,13 @@ class App(tk.Tk):
 
     # ===== logic =====
     def _log(self,msg):
+        """线程安全写日志 (使用 after 回到主线程)"""
         if not msg: return
         self.after(0,lambda:self._log_(msg))
     def _log_(self,msg):
         self._lt.config(state=tk.NORMAL); self._lt.insert(tk.END,msg+"\n"); self._lt.see(tk.END); self._lt.config(state=tk.DISABLED)
     def _prog(self,cur,tot,stat=""):
+        """线程安全更新进度条 (使用 after 回到主线程)"""
         self.after(0,lambda:self._prog_(cur,tot,stat))
     def _prog_(self,cur,tot,stat=""):
         self._bar["maximum"]=tot; self._bar["value"]=cur
@@ -359,6 +401,7 @@ class App(tk.Tk):
         self._pl.config(text=f"{cur}/{tot} ({p}%)  {stat}")
 
     def _check_login(self):
+        """启动时检查 Cookie 是否已有配置，自动连接并刷新课程列表"""
         if self.eng.load():
             self.eng.detect()
             self._st.config(text=f"已连接 | 学校:{self.eng.uid or'?'}",fg="green")
@@ -370,6 +413,7 @@ class App(tk.Tk):
                 CONFIG_FILE.write_text('{"cookie":"","uid":""}', encoding="utf-8")
 
     def _login_br(self):
+        """浏览器登录：EXE 环境手动粘贴；开发环境调用 login.py 全自动"""
         import subprocess
         is_frozen = getattr(sys, "frozen", False)
 
@@ -410,6 +454,7 @@ class App(tk.Tk):
             self._log("[浏览器已打开，登录后点「粘贴 Cookie」]")
 
     def _login_paste(self):
+        """弹出 Cookie 粘贴窗口，支持填写学校 ID"""
         dlg=tk.Toplevel(self); dlg.title("粘贴 Cookie"); dlg.geometry("520x340")
         dlg.transient(self); dlg.grab_set()
         tk.Label(dlg,text="粘贴 Cookie",font=("Microsoft YaHei UI",12,"bold")).pack(pady=(12,4))
@@ -432,6 +477,7 @@ class App(tk.Tk):
         tk.Button(dlg,text="保存",bg="#4A90D9",fg="white",width=10,command=lambda:sv()).pack(pady=10)
 
     def _refresh(self):
+        """刷新课程列表，重新获取并展示可下载的课程"""
         self.cs.clear(); self.vs.clear()
         for w in self._ci.winfo_children(): w.destroy()
         if not self.eng.cookies:
@@ -450,10 +496,12 @@ class App(tk.Tk):
         self._cnt.config(text=f"{len(xs)}个课程")
 
     def _tog(self,v):
+        """全选 / 取消全选课程"""
         for x in self.vs.values(): x.set(v)
 
     # ===== download =====
     def _toggle_dl(self):
+        """开始 / 继续下载：在新线程中逐课程执行下载流程"""
         if self.eng.pause:
             self.eng.pause=False; self._log("[继续]"); self._btn("暂停","pause"); return
         sel=[c for c,v in self.vs.items()if v.get()]
@@ -469,9 +517,11 @@ class App(tk.Tk):
         threading.Thread(target=w,daemon=True).start()
 
     def _do_pause(self):
+        """暂停下载：设置引擎暂停标志"""
         self.eng.pause=True; self._btn("继续","resume"); self._log("[已暂停]")
 
     def _btn(self,text,st):
+        """切换底部按钮的文本和回调 (暂停 / 继续 / 开始)"""
         if st=="pause":
             self._db.config(text=text,command=lambda:self._do_pause(),state=tk.NORMAL)
         elif st=="resume":
@@ -480,13 +530,16 @@ class App(tk.Tk):
             self._db.config(text="开始下载",command=lambda:self._toggle_dl(),state=tk.NORMAL)
 
     def _do_stop(self):
+        """停止下载：设置引擎停止标志，恢复按钮状态"""
         self.eng.stop=True; self.eng.pause=False; self._btn("开始下载","start"); self._log("[已停止]")
 
     def _done(self):
+        """下载完成回调：恢复按钮并弹窗提示"""
         self._btn("开始下载", "start");self._log("=== 完成 ===")
         messagebox.showinfo("下载完成", "所有课件已下载完毕！")
 
     def _close(self):
+        """窗口关闭时停止下载并销毁界面"""
         self.eng.stop=True; self.destroy()
 
 if __name__=="__main__":
