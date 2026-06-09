@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-"""雨课堂 PPT 下载器"""
 
 import json, os, sys, time, io, shutil, hashlib, ctypes, webbrowser, threading
 from pathlib import Path
@@ -7,6 +5,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import requests
 from PIL import Image
+
 
 HERE = Path(__file__).parent
 CONFIG_FILE = HERE / "config.json"
@@ -363,6 +362,7 @@ class App(tk.Tk):
         dlg.transient(self); dlg.grab_set()
         tk.Label(dlg,text="粘贴 Cookie",font=("Microsoft YaHei UI",12,"bold")).pack(pady=(12,4))
         tk.Label(dlg,text="F12 -> Application -> Cookies -> 全选复制 -> 粘贴到下方",fg="gray").pack()
+        uv=tk.StringVar(value=self.eng.uid or"")
         t=tk.Text(dlg,font=("Consolas",9),height=6,wrap=tk.WORD); t.pack(fill=tk.BOTH,expand=True,padx=12,pady=6)
         if CONFIG_FILE.exists():
             try:
@@ -372,7 +372,6 @@ class App(tk.Tk):
             except: pass
         rf=tk.Frame(dlg); rf.pack(fill=tk.X,padx=12,pady=2)
         tk.Label(rf,text="学校ID:",font=("Microsoft YaHei UI",9)).pack(side=tk.LEFT)
-        uv=tk.StringVar(value=self.eng.uid or"")
         tk.Entry(rf,textvariable=uv,width=16).pack(side=tk.LEFT,padx=6)
         def sv():
             r=t.get("1.0",tk.END).strip()
@@ -392,7 +391,7 @@ class App(tk.Tk):
         self.cs=xs
         for c in xs:
             cid=str(c.get("classroom_id","?")); nm=c.get("name",c.get("course_name","?"))
-            v=tk.BooleanVar(value=True); self.vs[cid]=v
+            v=tk.BooleanVar(value=False); self.vs[cid]=v
             f=tk.Frame(self._ci); f.pack(fill=tk.X,padx=2)
             tk.Checkbutton(f,text=f"  {nm}  ",variable=v,anchor=tk.W,padx=4).pack(side=tk.LEFT)
             tk.Label(f,text=cid,fg="gray").pack(side=tk.RIGHT,padx=6)
