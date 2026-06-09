@@ -5,10 +5,10 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import requests
 from PIL import Image
+import uv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-
 
 HERE = Path(__file__).parent
 CONFIG_FILE = HERE / "config.json"
@@ -60,6 +60,7 @@ class Engine:
 
     def mk(self,cid=""):
         cs=self.cookies.get("csrftoken",""); s=requests.Session(); s.cookies.update(self.cookies)
+        # 连接池优化
         adapter=HTTPAdapter(pool_connections=20,pool_maxsize=20,max_retries=Retry(total=2,backoff_factor=0.1))
         s.mount("https://",adapter); s.mount("http://",adapter)
         h={"Accept":"application/json","User-Agent":"Mozilla/5.0","X-CSRFToken":cs,"X-Client":"web","Xt-Agent":"web","classroom-id":cid,"xtbz":"ykt"}
@@ -110,6 +111,7 @@ class Engine:
         """每个线程使用独立 Session，避免线程安全问题"""
         for _ in range(3):
             try:
+                # 用独立请求替代 self.s，避免多线程竞争
                 r = requests.get(
                     url,
                     headers=self.s.headers if self.s else {"User-Agent": "Mozilla/5.0"},
@@ -136,8 +138,10 @@ class Engine:
                     results[i] = f.result()
                 except Exception:
                     pass
+                # 每完成3个更新一次进度
                 if prog_cb and completed % 3 == 0:
                     prog_cb(completed, len(urls))
+        # 返回原始顺序列表（含 None），外层决定是否过滤
         return results
 
     def pdf(self,imgs,path):
@@ -218,10 +222,12 @@ class Engine:
             while self.pause and not self.stop:
                 time.sleep(0.3)
 
+            # 并发下载，带进度回调
             def _pg(cur, tot):
                 prog(i + 1, total, f"{nm[:30]} {cur}/{tot}")
 
             raw_im = self.dl_slides(sls, prog_cb=_pg)
+            # 过滤失败页，但要求成功率>80%才生成PDF
             im = [b for b in raw_im if b]
             if len(im) < len(sls) * 0.8:
                 log(f"[失败] {nm} (仅下载{len(im)}/{len(sls)}页,成功率不足80%)")
@@ -414,7 +420,6 @@ class App(tk.Tk):
         dlg.transient(self); dlg.grab_set()
         tk.Label(dlg,text="粘贴 Cookie",font=("Microsoft YaHei UI",12,"bold")).pack(pady=(12,4))
         tk.Label(dlg,text="F12 -> Application -> Cookies -> 全选复制 -> 粘贴到下方",fg="gray").pack()
-        uv=tk.StringVar(value=self.eng.uid or"")
         t=tk.Text(dlg,font=("Consolas",9),height=6,wrap=tk.WORD); t.pack(fill=tk.BOTH,expand=True,padx=12,pady=6)
         if CONFIG_FILE.exists():
             try:
@@ -424,6 +429,7 @@ class App(tk.Tk):
             except: pass
         rf=tk.Frame(dlg); rf.pack(fill=tk.X,padx=12,pady=2)
         tk.Label(rf,text="学校ID:",font=("Microsoft YaHei UI",9)).pack(side=tk.LEFT)
+        uv=tk.StringVar(value=self.eng.uid or"")
         tk.Entry(rf,textvariable=uv,width=16).pack(side=tk.LEFT,padx=6)
         def sv():
             r=t.get("1.0",tk.END).strip()
